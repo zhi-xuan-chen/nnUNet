@@ -65,6 +65,7 @@ from nnunetv2.utilities.get_network_from_plans import get_network_from_plans
 from nnunetv2.utilities.helpers import empty_cache, dummy_context
 from nnunetv2.utilities.label_handling.label_handling import convert_labelmap_to_one_hot, determine_num_input_channels
 from nnunetv2.utilities.plans_handling.plans_handler import PlansManager
+import wandb
 
 
 class nnUNetTrainer(object):
@@ -146,7 +147,7 @@ class nnUNetTrainer(object):
         self.weight_decay = 3e-5
         self.oversample_foreground_percent = 0.33
         self.probabilistic_oversampling = False
-        self.num_iterations_per_epoch = 250
+        # self.num_iterations_per_epoch = 250
         self.num_val_iterations_per_epoch = 50
         self.num_epochs = 100
         self.current_epoch = 0
@@ -189,6 +190,9 @@ class nnUNetTrainer(object):
 
         self.was_initialized = False
 
+        # 初始化 step 计数器用于 wandb 记录
+        self.global_step = 0
+
         self.print_to_log_file("\n#######################################################################\n"
                                "Please cite the following paper when using nnU-Net:\n"
                                "Isensee, F., Jaeger, P. F., Kohl, S. A., Petersen, J., & Maier-Hein, K. H. (2021). "
@@ -196,6 +200,24 @@ class nnUNetTrainer(object):
                                "Nature methods, 18(2), 203-211.\n"
                                "#######################################################################\n",
                                also_print_to_console=True, add_timestamp=False)
+
+        # wandb 初始化
+        if self.local_rank == 0:
+            wandb.init(
+                project="OST_Pathology",
+                name=f"nnunetv2_{self.configuration_name}_{self.fold}",
+                config={
+                    "initial_lr": self.initial_lr,
+                    "weight_decay": self.weight_decay,
+                    "num_epochs": self.num_epochs,
+                    "batch_size": getattr(self, "batch_size", None),
+                    "oversample_foreground_percent": self.oversample_foreground_percent,
+                    "enable_deep_supervision": self.enable_deep_supervision,
+                    "configuration": self.configuration_name,
+                    "fold": self.fold,
+                    "dataset_name": self.plans_manager.dataset_name,
+                }
+            )
 
     def initialize(self):
         if not self.was_initialized:
@@ -960,6 +982,10 @@ class nnUNetTrainer(object):
         empty_cache(self.device)
         self.print_to_log_file("Training done.")
 
+        # wandb 结束
+        if self.local_rank == 0:
+            wandb.finish()
+
     def on_train_epoch_start(self):
         self.network.train()
         self.lr_scheduler.step(self.current_epoch)
@@ -1000,6 +1026,15 @@ class nnUNetTrainer(object):
             l.backward()
             torch.nn.utils.clip_grad_norm_(self.network.parameters(), 12)
             self.optimizer.step()
+        
+        # wandb 记录每个训练 step
+        if self.local_rank == 0:
+            wandb.log({
+                "train_step_loss": l.detach().cpu().numpy(),
+                "train_step_lr": self.optimizer.param_groups[0]['lr'],
+            }, step=self.global_step)
+            self.global_step += 1
+        
         return {'loss': l.detach().cpu().numpy()}
 
     def on_train_epoch_end(self, train_outputs: List[dict]):
@@ -1082,6 +1117,12 @@ class nnUNetTrainer(object):
             fp_hard = fp_hard[1:]
             fn_hard = fn_hard[1:]
 
+        # wandb 记录每个验证 step
+        if self.local_rank == 0:
+            wandb.log({
+                "val_step_loss": l.detach().cpu().numpy(),
+            }, step=self.global_step)
+
         return {'loss': l.detach().cpu().numpy(), 'tp_hard': tp_hard, 'fp_hard': fp_hard, 'fn_hard': fn_hard}
 
     def on_validation_epoch_end(self, val_outputs: List[dict]):
@@ -1145,6 +1186,24 @@ class nnUNetTrainer(object):
             self.logger.plot_progress_png(self.output_folder)
 
         self.current_epoch += 1
+
+        # wandb 日志记录
+        if self.local_rank == 0:
+            log_dict = {
+                "epoch": self.current_epoch,
+                "train_loss": self.logger.my_fantastic_logging['train_losses'][-1],
+                "val_loss": self.logger.my_fantastic_logging['val_losses'][-1],
+                "learning_rate": self.optimizer.param_groups[0]['lr'],
+            }
+            # mean_fg_dice
+            if 'mean_fg_dice' in self.logger.my_fantastic_logging:
+                log_dict["mean_fg_dice"] = self.logger.my_fantastic_logging['mean_fg_dice'][-1]
+            # dice_per_class_or_region
+            if 'dice_per_class_or_region' in self.logger.my_fantastic_logging:
+                dice_list = self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]
+                for i, v in enumerate(dice_list):
+                    log_dict[f"dice_class_{i}"] = v
+            wandb.log(log_dict, step=self.current_epoch)
 
     def save_checkpoint(self, filename: str) -> None:
         if self.local_rank == 0:
@@ -1367,15 +1426,19 @@ class nnUNetTrainer(object):
 
             self.on_train_epoch_start()
             train_outputs = []
-            for batch_id in range(self.num_iterations_per_epoch):
-                train_outputs.append(self.train_step(next(self.dataloader_train)))
+            for batch in self.dataloader_train:
+                train_outputs.append(self.train_step(batch))
             self.on_train_epoch_end(train_outputs)
 
             with torch.no_grad():
                 self.on_validation_epoch_start()
+                val_batches = list(self.dataloader_val)
+                total = len(val_batches)
+                step = max(1, total // self.num_val_iterations_per_epoch)
+                sampled_batches = [val_batches[i] for i in range(0, total, step)][:self.num_val_iterations_per_epoch]
                 val_outputs = []
-                for batch_id in range(self.num_val_iterations_per_epoch):
-                    val_outputs.append(self.validation_step(next(self.dataloader_val)))
+                for batch in sampled_batches:
+                    val_outputs.append(self.validation_step(batch))
                 self.on_validation_epoch_end(val_outputs)
 
             self.on_epoch_end()
