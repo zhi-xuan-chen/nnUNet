@@ -1,0 +1,1 @@
+nnUNetv2_predict -i /jhcnas1/chenzhixuan/data/OstPathData/extra_six_slides/filtered_images_nnunet -o /jhcnas1/chenzhixuan/data/OstPathData/extra_six_slides/filtered_pred_masks_nnunet -d 012 -c 2d -f all

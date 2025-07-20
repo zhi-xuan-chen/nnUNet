@@ -147,9 +147,9 @@ class nnUNetTrainer(object):
         self.weight_decay = 3e-5
         self.oversample_foreground_percent = 0.33
         self.probabilistic_oversampling = False
-        # self.num_iterations_per_epoch = 250
+        self.num_iterations_per_epoch = 250
         self.num_val_iterations_per_epoch = 50
-        self.num_epochs = 100
+        self.num_epochs = 1000
         self.current_epoch = 0
         self.enable_deep_supervision = True
 
@@ -185,7 +185,7 @@ class nnUNetTrainer(object):
         # self.configure_rotation_dummyDA_mirroring_and_inital_patch_size and will be saved in checkpoints
 
         ### checkpoint saving stuff
-        self.save_every = 5
+        self.save_every = 50
         self.disable_checkpointing = False
 
         self.was_initialized = False
@@ -1032,8 +1032,7 @@ class nnUNetTrainer(object):
             wandb.log({
                 "train_step_loss": l.detach().cpu().numpy(),
                 "train_step_lr": self.optimizer.param_groups[0]['lr'],
-            }, step=self.global_step)
-            self.global_step += 1
+            })
         
         return {'loss': l.detach().cpu().numpy()}
 
@@ -1121,7 +1120,7 @@ class nnUNetTrainer(object):
         if self.local_rank == 0:
             wandb.log({
                 "val_step_loss": l.detach().cpu().numpy(),
-            }, step=self.global_step)
+            })
 
         return {'loss': l.detach().cpu().numpy(), 'tp_hard': tp_hard, 'fp_hard': fp_hard, 'fn_hard': fn_hard}
 
@@ -1203,7 +1202,7 @@ class nnUNetTrainer(object):
                 dice_list = self.logger.my_fantastic_logging['dice_per_class_or_region'][-1]
                 for i, v in enumerate(dice_list):
                     log_dict[f"dice_class_{i}"] = v
-            wandb.log(log_dict, step=self.current_epoch)
+            wandb.log(log_dict)
 
     def save_checkpoint(self, filename: str) -> None:
         if self.local_rank == 0:
@@ -1426,19 +1425,15 @@ class nnUNetTrainer(object):
 
             self.on_train_epoch_start()
             train_outputs = []
-            for batch in self.dataloader_train:
-                train_outputs.append(self.train_step(batch))
+            for batch_id in range(self.num_iterations_per_epoch):
+                train_outputs.append(self.train_step(next(self.dataloader_train)))
             self.on_train_epoch_end(train_outputs)
 
             with torch.no_grad():
                 self.on_validation_epoch_start()
-                val_batches = list(self.dataloader_val)
-                total = len(val_batches)
-                step = max(1, total // self.num_val_iterations_per_epoch)
-                sampled_batches = [val_batches[i] for i in range(0, total, step)][:self.num_val_iterations_per_epoch]
                 val_outputs = []
-                for batch in sampled_batches:
-                    val_outputs.append(self.validation_step(batch))
+                for batch_id in range(self.num_val_iterations_per_epoch):
+                    val_outputs.append(self.validation_step(next(self.dataloader_val)))
                 self.on_validation_epoch_end(val_outputs)
 
             self.on_epoch_end()
