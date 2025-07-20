@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES='2' nnUNetv2_train 013 2d all -device cuda

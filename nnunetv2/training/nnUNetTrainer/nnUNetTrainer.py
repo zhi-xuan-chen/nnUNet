@@ -589,6 +589,7 @@ class nnUNetTrainer(object):
             case_identifiers = self.dataset_class.get_identifiers(self.preprocessed_dataset_folder)
             tr_keys = case_identifiers
             val_keys = tr_keys
+        # TODO: add a custom split for the OST dataset
         else:
             splits_file = join(self.preprocessed_dataset_folder_base, "splits_final.json")
             dataset = self.dataset_class(self.preprocessed_dataset_folder,
